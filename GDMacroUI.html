@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <style>
+        :root {
+            --bg: rgba(20, 20, 25, 0.92);
+            --accent: #007aff;
+            --text: #ffffff;
+            --text-dim: #a0a0a0;
+            --border: rgba(255, 255, 255, 0.1);
+        }
+
+        body {
+            font-family: -apple-system, sans-serif;
+            background: transparent;
+            color: var(--text);
+            margin: 0;
+            padding: 15px;
+            user-select: none;
+        }
+
+        .container {
+            background: var(--bg);
+            backdrop-filter: blur(25px);
+            -webkit-backdrop-filter: blur(25px);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 20px;
+        }
+
+        .title-group h1 {
+            font-size: 18px;
+            margin: 0;
+            font-weight: 700;
+        }
+
+        .stats {
+            font-size: 13px;
+            color: var(--text-dim);
+            margin-top: 4px;
+        }
+
+        .replay-tag {
+            font-size: 14px;
+            color: var(--text-dim);
+        }
+
+        .section-label {
+            font-size: 11px;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin: 15px 0 8px 5px;
+        }
+
+        .controls-grid {
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .row {
+            display: flex;
+            align-items: center;
+            padding: 12px 15px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .row:last-child { border-bottom: none; }
+
+        .row span { flex: 1; font-size: 15px; }
+
+        input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            accent-color: var(--accent);
+        }
+
+        .file-browser {
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            max-height: 160px;
+            overflow-y: auto;
+            margin: 10px 0;
+        }
+
+        .file-item {
+            padding: 12px 15px;
+            font-size: 14px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: 0.2s;
+        }
+
+        .file-item:active { background: rgba(255,255,255,0.1); }
+        .file-item.active { color: var(--accent); font-weight: 600; }
+        
+        .delete-btn {
+            color: #ff3b30;
+            font-size: 12px;
+            padding: 4px 8px;
+            background: rgba(255, 59, 48, 0.1);
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .bottom-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .btn {
+            flex: 1;
+            padding: 14px;
+            border: none;
+            border-radius: 12px;
+            font-weight: 600;
+            font-size: 15px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+
+        .btn-gray { background: #3a3a3c; color: white; }
+        .btn-blue { background: var(--accent); color: white; }
+        .btn:active { transform: scale(0.96); opacity: 0.8; }
+
+        .status-indicator {
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-dim);
+            margin-top: 15px;
+        }
+        #bot-status { color: var(--accent); font-weight: 700; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="title-group">
+                <h1>Flero Macro</h1>
+                <div class="stats">Inputs: <span id="inputs">0</span></div>
+            </div>
+            <div class="replay-tag" id="replay-name">.gdr2</div>
+        </div>
+
+        <div class="section-label">Settings</div>
+        <div class="controls-grid">
+            <div class="row">
+                <span>Enabled</span>
+                <input type="checkbox" id="enabled">
+            </div>
+            <div class="row">
+                <span>Practice Fix</span>
+                <input type="checkbox" id="practiceFix">
+            </div>
+            <div class="row">
+                <span>Legit Mode</span>
+                <input type="checkbox" id="legitMode">
+            </div>
+            <div class="row">
+                <span>Ignore Inputs</span>
+                <input type="checkbox" id="ignoreInputs">
+            </div>
+        </div>
+
+        <div class="section-label">Replays</div>
+        <div class="file-browser" id="replay-list">
+            <div class="file-item">Tap Refresh...</div>
+        </div>
+
+        <div class="bottom-actions">
+            <button class="btn btn-gray" onclick="window.webkit.messageHandlers.refresh.postMessage({})">Refresh</button>
+            <button class="btn btn-blue" id="play-btn" onclick="togglePlay()">Play</button>
+        </div>
+
+        <div class="status-indicator">
+            Bot: <span id="bot-status">Stopped</span>
+        </div>
+    </div>
+
+    <script>
+        function togglePlay() {
+            const btn = document.getElementById('play-btn');
+            const status = document.getElementById('bot-status');
+            const isPlaying = btn.textContent === 'Stop';
+            window.webkit.messageHandlers.playback.postMessage({ play: !isPlaying });
+            btn.textContent = isPlaying ? 'Play' : 'Stop';
+            status.textContent = isPlaying ? 'Stopped' : 'Playback';
+        }
+
+        function loadFile(name) {
+            window.webkit.messageHandlers.loadReplay.postMessage({ name: name });
+            document.getElementById('replay-name').textContent = name + '.gdr2';
+            document.querySelectorAll('.file-item').forEach(el => {
+                el.classList.toggle('active', el.getAttribute('data-name') === name);
+            });
+        }
+        
+        function deleteFile(event, name) {
+            event.stopPropagation();
+            if(confirm('Delete ' + name + '?')) {
+                window.webkit.messageHandlers.deleteReplay.postMessage({ name: name });
+            }
+        }
+
+        window.setReplayList = function(list) {
+            const container = document.getElementById('replay-list');
+            container.innerHTML = list.map(name => 
+                `<div class="file-item" data-name="${name}" onclick="loadFile('${name}')">
+                    <span>${name}</span>
+                    <span class="delete-btn" onclick="deleteFile(event, '${name}')">Delete</span>
+                </div>`
+            ).join('');
+        };
+
+        document.querySelectorAll('input').forEach(input => {
+            input.addEventListener('change', () => {
+                window.webkit.messageHandlers.settings.postMessage({
+                    enabled: document.getElementById('enabled').checked,
+                    practiceFix: document.getElementById('practiceFix').checked,
+                    legitMode: document.getElementById('legitMode').checked,
+                    ignoreInputs: document.getElementById('ignoreInputs').checked
+                });
+            });
+        });
+    </script>
+</body>
+</html>
