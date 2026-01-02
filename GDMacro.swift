@@ -176,6 +176,12 @@ struct rebinding {
 @_silgen_name("rebind_symbols")
 func rebind_symbols(_ rebindings: UnsafeMutablePointer<rebinding>, _ rebindings_nel: Int) -> Int32
 
+// MARK: - Global Hook Variables
+// These must be at file scope so the C-function hooks can access them,
+// and to avoid 'private' access control issues.
+private var originalBegan: TouchInjector.HandleTouchesFunc?
+private var originalEnded: TouchInjector.HandleTouchesFunc?
+
 // MARK: - Touch Injector with Fishhook
 class TouchInjector {
     static let shared = TouchInjector()
@@ -184,8 +190,6 @@ class TouchInjector {
     // virtual void handleTouchesBegin(int num, intptr_t ids[], float xs[], float ys[]);
     typealias HandleTouchesFunc = @convention(c) (UnsafeMutableRawPointer, Int32, UnsafeMutablePointer<intptr_t>, UnsafeMutablePointer<Float>, UnsafeMutablePointer<Float>) -> Void
     
-    private var originalBegan: HandleTouchesFunc?
-    private var originalEnded: HandleTouchesFunc?
     private var eglViewInstance: UnsafeMutableRawPointer?
     private var hooked = false
     
@@ -198,57 +202,64 @@ class TouchInjector {
         // Find CCEGLView instance
         findEGLViewInstance()
         
-        // Hook handleTouchesBegin and handleTouchesEnd
-        // Note: Symbol names may vary by iOS version - these are for Cocos2d-x 2.x on arm64
-        var beganRebinding = rebinding(
-            name: strdup("_ZN7cocos2d7CCEGLView17handleTouchesBeginEiPlPfS2_"),
-            replacement: unsafeBitCast(hooked_handleTouchesBegan as HandleTouchesFunc, to: UnsafeMutableRawPointer.self),
-            replaced: &originalBegan as! UnsafeMutablePointer<UnsafeMutableRawPointer?>
-        )
-        
-        var endedRebinding = rebinding(
-            name: strdup("_ZN7cocos2d7CCEGLView15handleTouchesEndEiPlPfS2_"),
-            replacement: unsafeBitCast(hooked_handleTouchesEnded as HandleTouchesFunc, to: UnsafeMutableRawPointer.self),
-            replaced: &originalEnded as! UnsafeMutablePointer<UnsafeMutableRawPointer?>
-        )
-        
-        var rebindings = [beganRebinding, endedRebinding]
-        let result = rebind_symbols(&rebindings, 2)
-        
-        if result == 0 {
-            print("[GDMacro] ✓ Successfully hooked touch events")
-        } else {
-            print("[GDMacro] ✗ Failed to hook (error: \(result))")
-            print("[GDMacro] ⚠️ Touch injection will use fallback mode")
+        // We use withUnsafeMutablePointer to get the addresses of our global function variables
+        // This is necessary because we cannot pass '&originalBegan' directly into the struct initializer
+        withUnsafeMutablePointer(to: &originalBegan) { beganPtr in
+            withUnsafeMutablePointer(to: &originalEnded) { endedPtr in
+                
+                // Fishhook expects UnsafeMutablePointer<UnsafeMutableRawPointer?>
+                // We cast our typed function pointers to this generic void** type
+                let replacedBegan = UnsafeMutableRawPointer(beganPtr).assumingMemoryBound(to: UnsafeMutableRawPointer?.self)
+                let replacedEnded = UnsafeMutableRawPointer(endedPtr).assumingMemoryBound(to: UnsafeMutableRawPointer?.self)
+                
+                var rebindings = [
+                    rebinding(
+                        name: strdup("_ZN7cocos2d7CCEGLView17handleTouchesBeginEiPlPfS2_"),
+                        replacement: unsafeBitCast(hooked_handleTouchesBegan as HandleTouchesFunc, to: UnsafeMutableRawPointer.self),
+                        replaced: replacedBegan
+                    ),
+                    rebinding(
+                        name: strdup("_ZN7cocos2d7CCEGLView15handleTouchesEndEiPlPfS2_"),
+                        replacement: unsafeBitCast(hooked_handleTouchesEnded as HandleTouchesFunc, to: UnsafeMutableRawPointer.self),
+                        replaced: replacedEnded
+                    )
+                ]
+                
+                let result = rebind_symbols(&rebindings, 2)
+                
+                if result == 0 {
+                    print("[GDMacro] ✓ Successfully hooked touch events")
+                } else {
+                    print("[GDMacro] ✗ Failed to hook (error: \(result))")
+                    print("[GDMacro] ⚠️ Touch injection will use fallback mode")
+                }
+            }
         }
     }
     
     private func findEGLViewInstance() {
         // Try to get CCDirector singleton and extract EGLView
-        // CCDirector::sharedDirector()->getOpenGLView()
-        
         guard let handle = dlopen(nil, RTLD_NOW) else {
             print("[GDMacro] ✗ Failed to open main binary")
             return
         }
         
         // Try to find CCDirector::sharedDirector symbol
-        // Mangled name for iOS arm64: _ZN7cocos2d10CCDirector14sharedDirectorEv
         if let directorFunc = dlsym(handle, "_ZN7cocos2d10CCDirector14sharedDirectorEv") {
             typealias DirectorFunc = @convention(c) () -> UnsafeMutableRawPointer
             let getDirector = unsafeBitCast(directorFunc, to: DirectorFunc.self)
             let director = getDirector()
             
             // Call getOpenGLView() on director instance
-            // This is a C++ virtual function call - offset in vtable
-            // Typically at offset +0x28 for Cocos2d-x 2.x
             let vtable = director.load(as: UnsafeMutableRawPointer.self)
             let getOpenGLViewPtr = (vtable + 0x28).load(as: UnsafeMutableRawPointer.self)
             typealias GetViewFunc = @convention(c) (UnsafeMutableRawPointer) -> UnsafeMutableRawPointer
             let getView = unsafeBitCast(getOpenGLViewPtr, to: GetViewFunc.self)
             eglViewInstance = getView(director)
             
-            print("[GDMacro] ✓ Found CCEGLView instance: \(String(format: "%p", eglViewInstance!))")
+            // Fix: Cast the pointer to Int for string formatting
+            let ptrAddress = Int(bitPattern: eglViewInstance!)
+            print("[GDMacro] ✓ Found CCEGLView instance: \(String(format: "%p", ptrAddress))")
         } else {
             print("[GDMacro] ✗ Failed to find CCDirector::sharedDirector")
         }
@@ -267,7 +278,7 @@ class TouchInjector {
         var x: Float = Float(UIScreen.main.bounds.width / 2)
         var y: Float = Float(UIScreen.main.bounds.height / 2)
         
-        // Call the appropriate original function
+        // Call the global original function pointers
         if down {
             if let began = originalBegan {
                 began(instance, 1, &touchId, &x, &y)
@@ -291,10 +302,8 @@ private func hooked_handleTouchesBegan(
     // Track user input for legit mode
     MacroManager.shared.onUserInput(down: true)
     
-    // Call original function
-    if let original = TouchInjector.shared.originalBegan {
-        original(instance, num, ids, xs, ys)
-    }
+    // Call original function (global variable)
+    originalBegan?(instance, num, ids, xs, ys)
 }
 
 private func hooked_handleTouchesEnded(
@@ -307,10 +316,8 @@ private func hooked_handleTouchesEnded(
     // Track user input for legit mode
     MacroManager.shared.onUserInput(down: false)
     
-    // Call original function
-    if let original = TouchInjector.shared.originalEnded {
-        original(instance, num, ids, xs, ys)
-    }
+    // Call original function (global variable)
+    originalEnded?(instance, num, ids, xs, ys)
 }
 
 // MARK: - UI Overlay
@@ -411,7 +418,4 @@ class MacroUI: NSObject, WKScriptMessageHandler {
     
     private func getEmbeddedHTML() -> String {
         return """
-        <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"><style>:root{--bg:rgba(20,20,25,0.95);--accent:#007aff;--text:#fff;--text-dim:#a0a0a0;--border:rgba(255,255,255,0.1)}body{font-family:-apple-system,sans-serif;background:transparent;color:var(--text);margin:0;padding:15px;user-select:none}.container{background:var(--bg);backdrop-filter:blur(30px);-webkit-backdrop-filter:blur(30px);border:1px solid var(--border);border-radius:20px;padding:20px;box-shadow:0 10px 50px rgba(0,0,0,0.6)}.header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px}.title-group h1{font-size:20px;margin:0;font-weight:700}.stats{font-size:13px;color:var(--text-dim);margin-top:4px}.replay-tag{font-size:13px;color:var(--text-dim)}.section-label{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;margin:15px 0 8px 5px}.controls-grid{background:rgba(255,255,255,0.05);border-radius:12px;overflow:hidden}.row{display:flex;align-items:center;padding:12px 15px;border-bottom:1px solid var(--border)}.row:last-child{border-bottom:none}.row span{flex:1;font-size:15px}input[type="checkbox"]{width:20px;height:20px;accent-color:var(--accent)}.file-browser{background:rgba(255,255,255,0.05);border-radius:12px;max-height:180px;overflow-y:auto;margin:10px 0}.file-item{padding:12px 15px;font-size:14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;transition:0.2s}.file-item:active{background:rgba(255,255,255,0.1)}.file-item.active{color:var(--accent);font-weight:600}.delete-btn{color:#ff3b30;font-size:11px;padding:4px 8px;background:rgba(255,59,48,0.15);border-radius:6px;cursor:pointer}.bottom-actions{display:flex;gap:10px;margin-top:20px}.btn{flex:1;padding:14px;border:none;border-radius:12px;font-weight:600;font-size:15px;cursor:pointer;transition:0.2s}.btn-gray{background:#3a3a3c;color:white}.btn-blue{background:var(--accent);color:white}.btn:active{transform:scale(0.96);opacity:0.8}.status-indicator{text-align:center;font-size:12px;color:var(--text-dim);margin-top:15px}#bot-status{color:var(--accent);font-weight:700}</style></head><body><div class="container"><div class="header"><div class="title-group"><h1>Flero Macro</h1><div class="stats">Inputs: <span id="inputs">0</span></div></div><div class="replay-tag" id="replay-name">.gdr2</div></div><div class="section-label">Settings</div><div class="controls-grid"><div class="row"><span>Enabled</span><input type="checkbox" id="enabled"></div><div class="row"><span>Practice Fix</span><input type="checkbox" id="practiceFix"></div><div class="row"><span>Legit Mode</span><input type="checkbox" id="legitMode"></div><div class="row"><span>Ignore Inputs</span><input type="checkbox" id="ignoreInputs"></div></div><div class="section-label">Replays</div><div class="file-browser" id="replay-list"><div class="file-item">Tap Refresh...</div></div><div class="bottom-actions"><button class="btn btn-gray" onclick="window.webkit.messageHandlers.refresh.postMessage({})">Refresh</button><button class="btn btn-blue" id="play-btn" onclick="togglePlay()">Play</button></div><div class="status-indicator">Bot: <span id="bot-status">Stopped</span></div></div><script>function togglePlay(){const btn=document.getElementById('play-btn');const status=document.getElementById('bot-status');const isPlaying=btn.textContent==='Stop';window.webkit.messageHandlers.playback.postMessage({play:!isPlaying});btn.textContent=isPlaying?'Play':'Stop';status.textContent=isPlaying?'Stopped':'Playback'}function loadFile(name){window.webkit.messageHandlers.loadReplay.postMessage({name:name});document.getElementById('replay-name').textContent=name+'.gdr2';document.querySelectorAll('.file-item').forEach(el=>el.classList.toggle('active',el.getAttribute('data-name')===name))}function deleteFile(event,name){event.stopPropagation();if(confirm('Delete '+name+'?'))window.webkit.messageHandlers.deleteReplay.postMessage({name:name})}window.setReplayList=function(list){const container=document.getElementById('replay-list');container.innerHTML=list.map(name=>`<div class="file-item" data-name="${name}" onclick="loadFile('${name}')"><span>${name}</span><span class="delete-btn" onclick="deleteFile(event,'${name}')">Delete</span></div>`).join('')};document.querySelectorAll('input').forEach(input=>{input.addEventListener('change',()=>{window.webkit.messageHandlers.settings.postMessage({enabled:document.getElementById('enabled').checked,practiceFix:document.getElementById('practiceFix').checked,legitMode:document.getElementById('legitMode').checked,ignoreInputs:document.getElementById('ignoreInputs').checked})})})</script></body></html>
-        """
-    }
-}
+        <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"><style>:root{--bg:rgba(20,20,25,0.95);--accent:#007aff;--text:#fff;--text-dim:#a0a0a0;--border:rgba(255,255,255,0.1)}body{font-family:-apple-system,sans-serif;background:transparent;color:var(--text);margin:0;padding:15px;user-select:none}.container{background:var(--bg);backdrop-filter:blur(30px);-webkit-backdrop-filter:blur(30px);border:1px solid var(--border);border-radius:20px;padding:20px;box-shadow:0 10px 50px rgba(0,0,0,0.6)}.header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px}.title-group h1{font-size:20px;margin:0;font-weight:700}.stats{font-size:13px;color:var(--text-dim);margin-top:4px}.replay-tag{font-size:13px;color:var(--text-dim)}.section-label{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;margin:15px 0 8px 5px}.controls-grid{background:rgba(255,255,255,0.05);border-radius:12px;overflow:hidden}.row{display:flex;align-items:center;padding:12px 15px;border-bottom:1px solid var(--border)}.row:last-child{border-bottom:none}.row span{flex:1;font-size:15px}input[type="checkbox"]{width:20px;height:20px;accent-color:var(--accent)}.file-browser{background:rgba(255,255,255,0.05);border-radius:12px;max-height:180px;overflow-y:auto;margin:10px 0}.file-item{padding:12px 15px;font-size:14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;transition:0.2s}.file-item:active{background:rgba(255,255,255,0.1)}.file-item.active{color:var(--accent);font-weight:600}.delete-btn{color:#ff3b30;font-size:11px;padding:4px 8px;background:rgba(255,59,48,0.15);border-radius:6px;cursor:pointer}.bottom-actions{display:flex;gap:10px;margin-top:20px}.btn{flex:1;padding:14px;border:none;border-radius:12px;font-weight:600;font-size:15px;cursor:pointer;transition:0.2s}.btn-gray{background:#3a3a3c;color:white}.btn-blue{background:var(--accent);color:white}.btn:active{transform:scale(0.96);opacity:0.8}.status-indicator{text-align:center;font-size:12px;color:var(--text-dim);margin-top:15px}#bot-status{color:var(--accent);font-weight:700}</style></head><body><div class="container"><div class="header"><div class="title-group"><h1>Flero Macro</h1><div class="stats">Inputs: <span id="inputs">0</span></div></div><div class="replay-tag" id="replay-name">.gdr2</div></div><div class="section-label">Settings</div><div class="controls-grid"><div class="row"><span>Enabled</span><input type="checkbox" id="enabled"></div><div class="row"><span>Practice Fix</span><input type="checkbox" id="practiceFix"></div><div class="row"><span>Legit Mode</span><input type="checkbox" id="legitMode"></div><div class="row"><span>Ignore Inputs</span><input type="
