@@ -1,5 +1,4 @@
-// GDMacro.swift - Geode-Safe Geometry Dash Macro Bot (iOS 2.206+)
-// Compile with your standard Swift setup
+// GDMacro.swift - Geode-Safe Geometry Dash Macro Bot (Swipe UI)
 import Foundation
 import UIKit
 import WebKit
@@ -9,10 +8,10 @@ import Darwin
 // MARK: - Entry Point
 @_cdecl("GDMacroInit")
 public func GDMacroInit() {
-    print("[GDMacro] === Initializing Geode-Safe Mode ===")
-    // Initialize on Main Thread
+    print("[GDMacro] === Initializing Geode-Safe Mode (Swipe UI) ===")
     DispatchQueue.main.async {
         _ = MacroManager.shared
+        // Delay UI injection slightly to ensure Window is ready
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
             MacroUI.shared.inject()
         }
@@ -54,7 +53,7 @@ class MacroManager {
     var isEnabled = false
     var practiceFix = false
     var legitMode = false
-    var ignoreInputs = false // If true, bot clicks even if you click
+    var ignoreInputs = false
     
     var currentReplay: GDR2Replay?
     var isPlaying = false
@@ -71,7 +70,6 @@ class MacroManager {
         replayPath = (docs as NSString).appendingPathComponent("Flero/flero/replays")
         try? FileManager.default.createDirectory(atPath: replayPath, withIntermediateDirectories: true)
         
-        // Setup Touch System
         TouchInjector.shared.setup()
     }
     
@@ -129,10 +127,8 @@ class MacroManager {
             let input = replay.inputs[nextInputIndex]
             if input.frame > currentFrame { break }
             
-            // Legit Mode Logic
             var shouldExecute = true
             if legitMode && !ignoreInputs {
-                // Check if user clicked recently (window of 10 frames)
                 let frameWindow = (currentFrame - 10)...(currentFrame + 10)
                 let userClicked = userInputs.contains { frameWindow.contains($0.frame) && $0.down == input.down }
                 if !userClicked { shouldExecute = false }
@@ -146,7 +142,7 @@ class MacroManager {
             nextInputIndex += 1
         }
         
-        userInputs.removeAll { $0.frame < currentFrame - 60 } // Cleanup
+        userInputs.removeAll { $0.frame < currentFrame - 60 }
         
         if nextInputIndex >= replay.inputs.count {
             stopPlayback()
@@ -161,12 +157,10 @@ class MacroManager {
     }
 }
 
-// MARK: - Touch Injector (The Fix)
+// MARK: - Touch Injector (Geode Safe)
 class TouchInjector {
     static let shared = TouchInjector()
     
-    // C Function Pointers for GD 2.2
-    // CCEGLView::handleTouchesBegin(int, intptr_t*, float*, float*)
     typealias TouchFunc = @convention(c) (UnsafeMutableRawPointer, Int32, UnsafeMutablePointer<Int>, UnsafeMutablePointer<Float>, UnsafeMutablePointer<Float>) -> Void
     typealias GetViewFunc = @convention(c) () -> UnsafeMutableRawPointer
     
@@ -175,60 +169,36 @@ class TouchInjector {
     private var eglViewInstance: UnsafeMutableRawPointer?
     
     func setup() {
-        print("[GDMacro] Setting up Touch System...")
-        
-        // 1. Find C++ Functions for Playback (Using dlsym)
         if let handle = dlopen(nil, RTLD_NOW) {
-            
-            // CCEGLView::sharedOpenGLView() - Safer than Director Offset
             if let viewSym = dlsym(handle, "_ZN7cocos2d7CCEGLView15sharedOpenGLViewEv") {
                 let getView = unsafeBitCast(viewSym, to: GetViewFunc.self)
                 self.eglViewInstance = getView()
-                print("[GDMacro] Found OpenGLView Instance")
             }
-            
-            // Touch Begin
             if let beginSym = dlsym(handle, "_ZN7cocos2d7CCEGLView17handleTouchesBeginEiPlPfS2_") {
                 self.handleTouchesBegin = unsafeBitCast(beginSym, to: TouchFunc.self)
             }
-            
-            // Touch End
             if let endSym = dlsym(handle, "_ZN7cocos2d7CCEGLView15handleTouchesEndEiPlPfS2_") {
                 self.handleTouchesEnd = unsafeBitCast(endSym, to: TouchFunc.self)
             }
-            
             dlclose(handle)
         }
-        
-        // 2. Swizzle EAGLView for Recording (Native iOS Hook)
-        // This hooks the raw iOS touch events before they reach C++
         Swizzler.swizzleEAGL()
     }
     
     func playTouch(down: Bool, player2: Bool) {
         guard let instance = eglViewInstance else { return }
-        
         var id = player2 ? 1 : 0
         var x = Float(UIScreen.main.bounds.midX)
         var y = Float(UIScreen.main.bounds.midY)
-        
-        if down {
-            handleTouchesBegin?(instance, 1, &id, &x, &y)
-        } else {
-            handleTouchesEnd?(instance, 1, &id, &x, &y)
-        }
+        if down { handleTouchesBegin?(instance, 1, &id, &x, &y) }
+        else { handleTouchesEnd?(instance, 1, &id, &x, &y) }
     }
 }
 
-// MARK: - Swizzler (Recording)
+// MARK: - Swizzler
 class Swizzler: NSObject {
     static func swizzleEAGL() {
-        // GD uses EAGLView (subclass of UIView) on iOS
-        guard let cls = NSClassFromString("EAGLView") else {
-            print("[GDMacro] EAGLView not found")
-            return
-        }
-        
+        guard let cls = NSClassFromString("EAGLView") else { return }
         let originalBegan = class_getInstanceMethod(cls, #selector(UIView.touchesBegan(_:with:)))
         let swizzledBegan = class_getInstanceMethod(Swizzler.self, #selector(Swizzler.hook_touchesBegan(_:with:)))
         method_exchangeImplementations(originalBegan!, swizzledBegan!)
@@ -236,13 +206,10 @@ class Swizzler: NSObject {
         let originalEnded = class_getInstanceMethod(cls, #selector(UIView.touchesEnded(_:with:)))
         let swizzledEnded = class_getInstanceMethod(Swizzler.self, #selector(Swizzler.hook_touchesEnded(_:with:)))
         method_exchangeImplementations(originalEnded!, swizzledEnded!)
-        
-        print("[GDMacro] Swizzled EAGLView for recording")
     }
     
     @objc func hook_touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         MacroManager.shared.recordUserInput(down: true)
-        // Call original (which is now stored in this selector)
         self.hook_touchesBegan(touches, with: event)
     }
     
@@ -252,30 +219,67 @@ class Swizzler: NSObject {
     }
 }
 
-// MARK: - UI Overlay
+// MARK: - Macro UI (Updated with Gestures)
 class MacroUI: NSObject, WKScriptMessageHandler {
     static let shared = MacroUI()
     var webView: WKWebView?
+    var isVisible = false
     
     func inject() {
         DispatchQueue.main.async {
             guard let window = UIApplication.shared.windows.first(where: \.isKeyWindow) else { return }
             
+            // 1. Setup Gestures (Swipe Left to Open, Right to Close)
+            let openSwipe = UISwipeGestureRecognizer(target: self, action: #selector(self.handleOpenSwipe))
+            openSwipe.direction = .left
+            openSwipe.numberOfTouchesRequired = 2 // 2 Fingers to prevent accidental opening
+            window.addGestureRecognizer(openSwipe)
+            
+            let closeSwipe = UISwipeGestureRecognizer(target: self, action: #selector(self.handleCloseSwipe))
+            closeSwipe.direction = .right
+            closeSwipe.numberOfTouchesRequired = 2
+            window.addGestureRecognizer(closeSwipe)
+            
+            // 2. Setup WebView
             let config = WKWebViewConfiguration()
             ["settings","playback","loadReplay","deleteReplay","refresh"].forEach {
                 config.userContentController.add(self, name: $0)
             }
             
-            let wv = WKWebView(frame: CGRect(x: 20, y: 100, width: 340, height: 500), configuration: config)
+            let wv = WKWebView(frame: CGRect(x: 20, y: 80, width: 320, height: 480), configuration: config)
             wv.isOpaque = false; wv.backgroundColor = .clear; wv.scrollView.backgroundColor = .clear
-            wv.layer.cornerRadius = 15; wv.clipsToBounds = true
+            wv.layer.cornerRadius = 16; wv.clipsToBounds = true
             
+            // Hidden by default
+            wv.alpha = 0
+            wv.isHidden = true
+            
+            // Drag support
             let pan = UIPanGestureRecognizer(target: self, action: #selector(self.p(_:)))
             wv.addGestureRecognizer(pan)
+            
             window.addSubview(wv)
             self.webView = wv
             
             wv.loadHTMLString(self.html, baseURL: nil)
+            print("[GDMacro] UI Injected (Hidden). Swipe LEFT with 2 Fingers to open.")
+        }
+    }
+    
+    @objc func handleOpenSwipe() {
+        guard let wv = webView, !isVisible else { return }
+        isVisible = true
+        wv.isHidden = false
+        UIView.animate(withDuration: 0.3) { wv.alpha = 1.0 }
+    }
+    
+    @objc func handleCloseSwipe() {
+        guard let wv = webView, isVisible else { return }
+        isVisible = false
+        UIView.animate(withDuration: 0.3, animations: {
+            wv.alpha = 0.0
+        }) { _ in
+            wv.isHidden = true
         }
     }
     
@@ -314,31 +318,33 @@ class MacroUI: NSObject, WKScriptMessageHandler {
     
     var html: String { return """
     <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
-    body{font-family:system-ui;background:rgba(20,20,25,0.95);color:#fff;padding:15px;user-select:none;font-size:14px}
-    .box{border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:15px}
-    .row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05)}
-    .btn{background:#007aff;color:#fff;border:0;padding:12px;border-radius:8px;width:100%;font-weight:600;margin-top:10px}
-    .list{height:180px;overflow-y:auto;background:rgba(0,0,0,0.3);border-radius:8px;margin:10px 0}
-    .item{padding:10px;border-bottom:1px solid rgba(255,255,255,0.05)}
-    .item:active{background:rgba(255,255,255,0.1)}
+    body{font-family:system-ui;background:rgba(15,15,20,0.95);color:#fff;padding:15px;user-select:none;font-size:13px}
+    .box{border:1px solid rgba(255,255,255,0.15);border-radius:14px;padding:15px}
+    h3{margin:0 0 10px 0;display:flex;justify-content:space-between}
+    .row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.08)}
+    .btn{background:#0a84ff;color:#fff;border:0;padding:12px;border-radius:10px;width:100%;font-weight:600;margin-top:10px}
+    .list{height:200px;overflow-y:auto;background:rgba(0,0,0,0.3);border-radius:8px;margin:10px 0}
+    .item{padding:10px;border-bottom:1px solid rgba(255,255,255,0.05);transition:0.2s}
+    .item:active{background:rgba(255,255,255,0.15)}
     </style></head><body>
     <div class="box">
-        <h3>Flero Macro <span id="st" style="font-size:12px;color:#888;font-weight:400">Idle</span></h3>
+        <h3>Flero <span id="st" style="font-weight:400;color:#888">Idle</span></h3>
         <div class="row">Inputs: <span id="inputs">0</span></div>
         <div class="row"><span>Enabled</span><input type="checkbox" id="enabled"></div>
         <div class="row"><span>Legit Mode</span><input type="checkbox" id="legitMode"></div>
         <div class="list" id="list"><div>Loading...</div></div>
-        <div style="display:flex;gap:10px">
+        <div style="display:flex;gap:8px">
             <button class="btn" style="background:#333" onclick="window.webkit.messageHandlers.refresh.postMessage({})">Refresh</button>
             <button class="btn" id="pBtn" onclick="toggle()">Play</button>
         </div>
+        <div style="text-align:center;color:#666;font-size:10px;margin-top:10px">Swipe Right (2 Fingers) to Close</div>
     </div>
     <script>
     function toggle(){
         const b=document.getElementById('pBtn');
         const p=b.innerText==='Play';
         b.innerText=p?'Stop':'Play';
-        b.style.background=p?'#ff3b30':'#007aff';
+        b.style.background=p?'#ff453a':'#0a84ff';
         window.webkit.messageHandlers.playback.postMessage({play:p});
     }
     window.setReplayList=l=>{document.getElementById('list').innerHTML=l.map(n=>`<div class="item" onclick="window.webkit.messageHandlers.loadReplay.postMessage({name:'${n}'})">${n}</div>`).join('')};
